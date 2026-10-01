@@ -1,0 +1,55 @@
+import {chromium} from 'playwright';
+import {spawn} from 'node:child_process';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import assert from 'node:assert/strict';
+const temp=mkdtempSync(join(tmpdir(),'equitypilot-browser-'));
+const origin='http://localhost:3001';
+const server=spawn(process.execPath,['--import','tsx','server/index.ts'],{env:{...process.env,PORT:'3001',APP_ORIGIN:origin,DB_PATH:join(temp,'db.sqlite'),NODE_ENV:'production',OPENAI_API_KEY:''},stdio:'pipe'});
+let logs='';server.stdout.on('data',x=>logs+=x);server.stderr.on('data',x=>logs+=x);
+let browser;
+try{
+ let healthy=false;
+ for(let i=0;i<100;i++){if(server.exitCode!==null)throw Error(logs);try{if((await fetch(origin+'/api/health')).ok){healthy=true;break}}catch{}await new Promise(r=>setTimeout(r,100));}
+ assert.ok(healthy,'server did not start');
+ browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,args:['--no-sandbox','--no-zygote','--single-process','--disable-gpu','--disable-software-rasterizer','--disable-dev-shm-usage']}:{})});
+ const page=await browser.newPage({viewport:{width:1440,height:1160}});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(origin);await page.waitForFunction(()=>{const b=document.querySelector('.saveform button');return b&&!b.disabled});
+ await page.screenshot({path:'docs/dashboard.png',fullPage:true});
+ await page.getByLabel('Scenario name',{exact:true}).fill('Browser base');
+ await page.getByRole('button',{name:'Save scenario',exact:true}).click();
+ await page.getByRole('button',{name:'Save branch',exact:true}).waitFor();
+ await page.getByLabel('Future share price').fill('60');
+ await page.getByLabel('Scenario name',{exact:true}).fill('Browser downside');
+ await page.getByRole('button',{name:'Save branch',exact:true}).click();
+ await page.getByRole('status').getByText(/Scenario saved/).waitFor();
+ await page.getByRole('button',{name:/^Scenarios/}).click();
+ await page.getByRole('button',{name:'Browser base',exact:true}).click();
+ await page.getByRole('button',{name:'Assistant',exact:true}).click();
+ await page.getByRole('button',{name:'Sell half at $100 ↗'}).click();
+ await page.getByText('CALCULATED ANSWER',{exact:false}).waitFor();
+ await page.getByRole('button',{name:'Apply to scenario'}).click();
+ assert.equal(await page.getByLabel('Future share price').inputValue(),'100');
+ await page.getByRole('button',{name:'Audit trace',exact:true}).click();
+ await page.getByText('resolveShareAllocation',{exact:true}).waitFor();
+ await page.reload();
+ await page.getByRole('button',{name:/^Scenarios/}).click();
+ await page.getByRole('button',{name:'Browser base',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Delete Browser base',exact:true}).click();
+ await page.getByRole('button',{name:'Delete Browser base',exact:true}).waitFor({state:'detached'});
+ await page.getByRole('button',{name:'Delete Browser downside',exact:true}).click();
+ await page.getByRole('button',{name:'Delete Browser downside',exact:true}).waitFor({state:'detached'});
+ await page.setViewportSize({width:390,height:844});
+ await page.getByRole('button',{name:'Overview',exact:true}).click();
+ await page.getByRole('status').waitFor({state:'detached'});
+ await page.screenshot({path:'docs/mobile.png',fullPage:true});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'mobile overflow');
+ assert.deepEqual(errors,[],'browser errors');
+ console.log('Browser passed: production assets, save, branch, load, assistant, apply, trace, reload persistence, delete, mobile layout.');
+}finally{
+ if(browser)await browser.close();server.kill('SIGTERM');
+ await new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve)});
+ rmSync(temp,{recursive:true,force:true});
+}
